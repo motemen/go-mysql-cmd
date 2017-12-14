@@ -5,35 +5,39 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"os"
 	"os/exec"
+	"strings"
 )
 
-var delimiter = "__mysql_cmd__"
+var Delimiter = "!!!__mysql_cmd__!!!"
 
-type mediator struct {
-	cmd    *exec.Cmd
-	r      io.ReadCloser
-	w      io.WriteCloser
-	errBuf *bytes.Buffer
+type Cmd struct {
+	Delimiter string
+	cmd       *exec.Cmd
+	r         io.ReadCloser
+	w         io.WriteCloser
+	errBuf    *bytes.Buffer
 }
 
-func (m *mediator) Exec(command string) ([][][]byte, error) {
-	log.Printf("debug: Exec: %q", command)
-
+func (m *Cmd) Exec(command string) ([][]string, error) {
+	delimiter := m.Delimiter
+	if delimiter == "" {
+		delimiter = Delimiter
+	}
 	_, err := fmt.Fprintf(m.w, "%s; SELECT '%s';\n", command, delimiter)
 	if err != nil {
 		return nil, err
 	}
 
-	rows := [][][]byte{}
+	rows := [][]string{}
 
 	s := bufio.NewScanner(m.r)
 	for s.Scan() {
 		if s.Text() == delimiter {
 			return rows, nil
 		} else {
-			fields := bytes.Split(s.Bytes(), []byte("\t"))
+			fields := strings.Split(s.Text(), "\t")
 			rows = append(rows, fields)
 		}
 	}
@@ -41,13 +45,13 @@ func (m *mediator) Exec(command string) ([][][]byte, error) {
 	return rows, s.Err()
 }
 
-func (m *mediator) Close() error {
+func (m *Cmd) Close() error {
 	m.w.Close()
 	m.r.Close()
 	return m.cmd.Wait()
 }
 
-func (m *mediator) Err() error {
+func (m *Cmd) Err() error {
 	errString := m.errBuf.String()
 	if errString != "" {
 		return fmt.Errorf("%s", errString)
@@ -55,12 +59,13 @@ func (m *mediator) Err() error {
 	return nil
 }
 
-func New(args ...string) (*mediator, error) {
+func New(args ...string) (*Cmd, error) {
 	args = append(args, "--skip-column-names", "--batch", "--unbuffered")
 
 	var errBuf bytes.Buffer
 	cmd := exec.Command("mysql", args...)
-	cmd.Stderr = &errBuf
+	// cmd.Stderr = &errBuf
+	cmd.Stderr = os.Stderr
 
 	r, err := cmd.StdoutPipe()
 	if err != nil {
@@ -75,7 +80,7 @@ func New(args ...string) (*mediator, error) {
 		return nil, err
 	}
 
-	m := &mediator{
+	m := &Cmd{
 		cmd:    cmd,
 		r:      r,
 		w:      w,
@@ -84,4 +89,15 @@ func New(args ...string) (*mediator, error) {
 
 	_, err = m.Exec("SET SESSION wait_timeout = 3600")
 	return m, err
+}
+
+var unescaper = strings.NewReplacer(
+	`\n`, "\n",
+	`\t`, "\t",
+	`\0`, "\x00",
+	`\\`, "\\",
+)
+
+func UnescapeString(s string) string {
+	return unescaper.Replace(s)
 }
